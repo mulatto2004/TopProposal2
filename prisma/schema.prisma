@@ -1,0 +1,345 @@
+// TopProposal — Prisma Schema
+// Database: PostgreSQL (Supabase)
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// AUTH MODELS (NextAuth v5 + Prisma Adapter)
+// ─────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts     Account[]
+  sessions     Session[]
+  business     Business?
+  subscription Subscription?
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─────────────────────────────────────────────
+// BUSINESS PROFILE
+// Filled during onboarding after first login
+// ─────────────────────────────────────────────
+
+model Business {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  name           String
+  logo           String?  // URL to uploaded logo image
+  email          String?
+  phone          String?
+  address        String?
+  city           String?
+  state          String?
+  zipCode        String?
+  country        String   @default("US")
+  website        String?
+  industry       String?  // "construction" | "photography" | "cleaning" | etc.
+  taxRate        Float    @default(0)        // percentage, e.g. 8.5
+  currency       String   @default("USD")
+  paymentTerms   String   @default("Due on receipt")
+  defaultNotes   String?  @db.Text
+  defaultTerms   String?  @db.Text
+  onboardingDone Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clients Client[]
+  quotes  Quote[]
+
+  @@map("businesses")
+}
+
+// ─────────────────────────────────────────────
+// CLIENT  (CRM Lite)
+// Each business owns their own client records
+// ─────────────────────────────────────────────
+
+model Client {
+  id         String   @id @default(cuid())
+  businessId String
+  name       String
+  email      String
+  phone      String?
+  company    String?
+  address    String?
+  city       String?
+  state      String?
+  zipCode    String?
+  notes      String?  @db.Text
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  quotes   Quote[]
+
+  @@map("clients")
+}
+
+// ─────────────────────────────────────────────
+// QUOTE  — core model, tracks full lifecycle
+// ─────────────────────────────────────────────
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  INVOICED
+}
+
+enum TemplateStyle {
+  MINIMAL
+  PROFESSIONAL
+  BOLD
+}
+
+model Quote {
+  id          String        @id @default(cuid())
+  businessId  String
+  clientId    String?       // Optional link to CRM client
+
+  // Identity
+  title           String
+  referenceNumber String        @unique
+  status          QuoteStatus   @default(DRAFT)
+  templateStyle   TemplateStyle @default(PROFESSIONAL)
+
+  // Client info snapshot (self-contained even without CRM link)
+  clientName    String
+  clientEmail   String
+  clientPhone   String?
+  clientCompany String?
+
+  // Financials (all computed and stored for fast reads)
+  subtotal       Float @default(0)
+  discountType   String? // "percentage" | "flat"
+  discountValue  Float   @default(0)
+  discountAmount Float   @default(0) // computed
+  taxRate        Float   @default(0)
+  taxAmount      Float   @default(0) // computed
+  total          Float   @default(0) // grand total
+
+  // Deposit
+  requireDeposit  Boolean @default(false)
+  depositPercent  Float?
+  depositAmount   Float?
+  depositPaid     Boolean @default(false)
+  depositStripeId String? // Stripe PaymentIntent ID
+
+  // Dates
+  issueDate   DateTime  @default(now())
+  expiryDate  DateTime?
+  sentAt      DateTime?
+  viewedAt    DateTime?
+  acceptedAt  DateTime?
+  declinedAt  DateTime?
+
+  // Content
+  notes  String? @db.Text
+  terms  String? @db.Text
+
+  // Public sharing & tracking
+  shareToken String @unique // /q/[shareToken] — no login needed
+  viewCount  Int    @default(0)
+
+  // Follow-up automation flags
+  followUpEnabled Boolean @default(true)
+  followUp1Sent   Boolean @default(false) // 48h "not opened" reminder
+  followUp2Sent   Boolean @default(false) // 72h "not accepted" nudge
+
+  declineReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business  Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  client    Client?    @relation(fields: [clientId], references: [id])
+  lineItems LineItem[]
+  signature Signature?
+  invoice   Invoice?
+
+  @@map("quotes")
+}
+
+// ─────────────────────────────────────────────
+// LINE ITEM  — belongs to a Quote
+// ─────────────────────────────────────────────
+
+model LineItem {
+  id          String @id @default(cuid())
+  quoteId     String
+  description String
+  quantity    Float  @default(1)
+  unitPrice   Float  @default(0)
+  total       Float  @default(0) // quantity × unitPrice
+  sortOrder   Int    @default(0) // for drag-and-drop reordering
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@map("line_items")
+}
+
+// ─────────────────────────────────────────────
+// SIGNATURE  — captured when client accepts
+// ─────────────────────────────────────────────
+
+enum SignatureMethod {
+  TYPED
+  DRAWN
+}
+
+model Signature {
+  id            String         @id @default(cuid())
+  quoteId       String         @unique
+  signerName    String
+  signerEmail   String
+  method        SignatureMethod @default(TYPED)
+  signatureData String?        @db.Text // base64 PNG if drawn
+  ipAddress     String?
+  userAgent     String?
+  signedAt      DateTime       @default(now())
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@map("signatures")
+}
+
+// ─────────────────────────────────────────────
+// INVOICE  — one-click converted from Quote
+// ─────────────────────────────────────────────
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id         String        @id @default(cuid())
+  quoteId    String        @unique
+  businessId String
+
+  invoiceNumber String        @unique
+  status        InvoiceStatus @default(DRAFT)
+
+  subtotal       Float
+  discountAmount Float @default(0)
+  taxAmount      Float @default(0)
+  total          Float
+  depositPaid    Float @default(0) // already paid as deposit
+  amountDue      Float              // total - depositPaid
+
+  issueDate DateTime  @default(now())
+  dueDate   DateTime?
+  sentAt    DateTime?
+  paidAt    DateTime?
+
+  stripePaymentId String?
+  notes           String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quote Quote @relation(fields: [quoteId], references: [id])
+
+  @@map("invoices")
+}
+
+// ─────────────────────────────────────────────
+// SUBSCRIPTION  — Stripe plan per user
+// ─────────────────────────────────────────────
+
+enum PlanTier {
+  FREE
+  PRO
+  BUSINESS
+}
+
+model Subscription {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  stripeCustomerId     String? @unique
+  stripeSubscriptionId String? @unique
+  stripePriceId        String?
+
+  plan   PlanTier @default(FREE)
+  status String   @default("active") // Stripe: active | past_due | canceled | trialing
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean   @default(false)
+
+  // Free plan usage tracking
+  quotesThisMonth  Int      @default(0)
+  usagePeriodStart DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
